@@ -7,12 +7,43 @@ import random
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
+EVAL_STAGES_PER_RUN = ["register", "validate", "subset", "dist", "judge", "detector"]
+
+
+@dataclass
+class RunSpec:
+    backend: str
+    variant: str
+    run_name: str
+    gen_csv: Path
+    prompt_config: Path
+    prompt_lang: str
+
+
+def run_cmd(cmd: List[str]) -> None:
+    print("\n$", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def run_stage(args: List[str]) -> None:
+    print("\n$", "stage", " ".join(args))
+    old_argv = sys.argv[:]
+    try:
+        sys.argv = [__file__] + args
+        _stage_main()
+    finally:
+        sys.argv = old_argv
+
+
+
+# ---- Inlined stage execution library ----
 STAGES = [
     "register",
     "validate",
@@ -25,11 +56,26 @@ STAGES = [
 ]
 
 LANGUAGE_PRESETS: Dict[str, Dict[str, str]] = {
-    # Only keep true overrides/exceptions; standard languages are derived dynamically.
+    # Keep only true path/data exceptions. Standard languages resolve dynamically.
+    "nepali": {
+        "dataset": "yt_nepali_movie_reviews",
+        "dataset_root": "languages/nepali/datasets/yt_nepali_movie_reviews",
+        "runs_root": "languages/nepali/runs/yt_nepali_movie_reviews",
+    },
+    "hausa": {
+        # Preserve legacy shared runs root for Hausa.
+        "runs_root": "languages/hausa/runs",
+    },
     "hausa_hau_tts": {
         "dataset": "hau_tts",
         "dataset_root": "languages/hausa/datasets/hau_tts",
         "runs_root": "languages/hausa/runs/hau_tts",
+    },
+    "swahili": {
+        # Preserve legacy misspelled on-disk directory.
+        "dataset": "swahilli_reviews",
+        "dataset_root": "languages/swahilli/datasets/swahilli_reviews",
+        "runs_root": "languages/swahilli/runs",
     },
 }
 
@@ -57,11 +103,6 @@ def write_json(path: Path, obj: Dict[str, Any]) -> None:
     ensure_parent(path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-
-
-def run_cmd(cmd: List[str]) -> None:
-    print("\n$", " ".join(cmd))
-    subprocess.run(cmd, check=True)
 
 
 def sha256_file(path: Path) -> str:
@@ -116,6 +157,17 @@ def infer_language_from_path_str(path_s: str) -> str:
     return ""
 
 
+def language_token(language: str) -> str:
+    raw = (language or "").strip().lower()
+    token = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return token or "language"
+
+
+def canonical_language(language: str) -> str:
+    token = language_token(language)
+    return LANGUAGE_ALIASES.get(token, token)
+
+
 def resolve_language(language_arg: str, dataset_root_arg: str, runs_root_arg: str) -> str:
     raw = str(language_arg or "").strip().lower()
     if raw and raw != "auto":
@@ -134,14 +186,12 @@ def preset_value(language: str, key: str, fallback: str = "") -> str:
     return str(values.get(key, fallback))
 
 
-def default_dataset_name(language: str) -> str:
-    token = canonical_language(language)
-    return f"{token}_reviews"
-
-
 def default_language_root(language: str) -> str:
-    token = canonical_language(language)
-    return f"languages/{token}"
+    return f"languages/{canonical_language(language)}"
+
+
+def default_dataset_name(language: str) -> str:
+    return f"{canonical_language(language)}_reviews"
 
 
 def default_dataset_root(language: str, dataset: str) -> str:
@@ -163,18 +213,17 @@ def default_preset_values(language: str) -> Dict[str, str]:
     }
 
 
-def canonical_language(language: str) -> str:
-    token = language_token(language)
-    return LANGUAGE_ALIASES.get(token, token)
-
-
-def default_real_csv(language: str) -> Path:
-    lang = canonical_language(language)
-    return Path(default_language_root(lang)) / "raw" / f"real_{lang}_reviews.csv"
-
-
 def default_control_template(language: str) -> str:
-    _ = language
+    lang = canonical_language(language)
+    if lang == "hausa":
+        return (
+            "Wannan sharhi ne na samfurin rubutu. Ban kalli fim din ba amma ina maimaita jimloli iri daya. "
+            "Fim din yana da kyau. Fim din yana da kyau. Fim din yana da kyau. "
+            "Labarin yana da kyau. Labarin yana da kyau. Labarin yana da kyau. "
+            "Aiki yana da kyau. Aiki yana da kyau. Aiki yana da kyau. "
+            "Babu cikakkun bayanai na ainihin kwarewa ko scene. "
+            "[TEMPLATE][GENERIC][NO_DETAIL]"
+        )
     return (
         "This is a templated review. I did not directly experience the movie/product and I am repeating generic lines. "
         "It is good. It is good. It is good. "
@@ -287,37 +336,19 @@ def baseline_run_names(model_family: str, language: str = "hausa", run_name: str
     zs_guess = replace_prompt_variant(run_name, "zs")
     if fs5_guess or zs_guess:
         return fs5_guess or "", zs_guess or ""
-
-    lang = (language or "").strip().lower()
-    if lang.startswith("hausa"):
-        if model_family == "qwen":
-            return ("qwen3_fs5_hausa_v1", "qwen3_zs_hausa_v1")
-        if model_family == "llama":
-            return ("llama31_fs5_hausa_v1", "llama31_zs_hausa_v1")
     return ("", "")
 
 
-def language_token(language: str) -> str:
-    raw = (language or "").strip().lower()
-    token = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
-    if not token:
-        return "language"
-    if token == "swahilli":
-        return "swahili"
-    return token
-
-
 def quality_flag_cols_for_language(language: str) -> List[str]:
-    token = language_token(language)
+    token = canonical_language(language)
     cols = [f"is_{token}_ok", "is_language_ok"]
 
-    # Compatibility with historical column spellings.
+    # Backward-compatibility aliases used in historical runs.
     if token == "swahili":
-        cols.insert(0, "is_swahilli_ok")
+        cols = ["is_swahilli_ok", "is_swahili_ok"] + cols
     if token == "nepali":
-        cols.insert(0, "is_devanagari_ok")
+        cols = ["is_devanagari_ok"] + cols
 
-    # Preserve order while removing duplicates.
     out: List[str] = []
     seen = set()
     for col in cols:
@@ -328,8 +359,21 @@ def quality_flag_cols_for_language(language: str) -> List[str]:
 
 
 def quality_rate_key_for_language(language: str) -> str:
-    token = language_token(language)
+    token = canonical_language(language)
+    if token == "nepali":
+        return "devanagari_ok_rate"
     return f"{token}_ok_rate"
+
+
+def add_compat_quality_rate_aliases(stats: Dict[str, Any], language: str) -> Dict[str, Any]:
+    out = dict(stats)
+    lang = canonical_language(language)
+    if lang == "swahili":
+        if "swahili_ok_rate" in out:
+            out["swahilli_ok_rate"] = out["swahili_ok_rate"]
+        if "swahilli_ok_rate" in out:
+            out["swahili_ok_rate"] = out["swahilli_ok_rate"]
+    return out
 
 
 def validate_gen_csv(gen_csv: Path, language: str) -> Dict[str, Any]:
@@ -373,14 +417,6 @@ def validate_gen_csv(gen_csv: Path, language: str) -> Dict[str, Any]:
     }
 
 
-def add_compat_quality_rate_aliases(stats: Dict[str, Any], language: str) -> Dict[str, Any]:
-    out = dict(stats)
-    lang = (language or "").strip().lower()
-    if lang in {"swahilli", "swahili"} and "swahili_ok_rate" in out:
-        out["swahilli_ok_rate"] = out["swahili_ok_rate"]
-    return out
-
-
 def load_common_ids(common_ids_csv: Optional[Path]) -> Optional[set]:
     if common_ids_csv is None or not common_ids_csv.exists():
         return None
@@ -392,8 +428,6 @@ def load_common_ids(common_ids_csv: Optional[Path]) -> Optional[set]:
 
 def build_subset(gen_csv: Path, common_ids_csv: Path, out_csv: Path) -> Dict[str, Any]:
     gen = pd.read_csv(gen_csv)
-    if "target_id" not in gen.columns:
-        raise RuntimeError("subset stage requires target_id column in gen_csv")
     common_ids = load_common_ids(common_ids_csv)
     if common_ids is None:
         raise RuntimeError(f"common_ids_csv not found or empty: {common_ids_csv}")
@@ -649,6 +683,7 @@ def build_pairwise_input(
     pair_exact_balance_lr: bool,
     judge_seed_base: int,
     domain_default: str,
+    language: str,
     control_template_text: str,
     dedupe_meta: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -1039,7 +1074,7 @@ def build_pairwise_input(
     }
 
 
-def main() -> None:
+def _stage_main() -> None:
     ap = argparse.ArgumentParser(description="Staged baseline-anchored eval pipeline")
     ap.add_argument("--stage", required=True, choices=STAGES)
     ap.add_argument("--run_name", required=True)
@@ -1048,7 +1083,7 @@ def main() -> None:
     ap.add_argument(
         "--language",
         default="auto",
-        help="Language preset for defaults (auto|hausa|hausa_hau_tts|swahilli|swahili|korean|igbo)",
+        help="Language preset for defaults (auto|nepali|hausa|hausa_hau_tts|swahilli|swahili|korean|igbo)",
     )
     ap.add_argument("--dataset", default="")
     ap.add_argument("--cohort", default="common_subset_v1")
@@ -1127,8 +1162,8 @@ def main() -> None:
     cohort_exp_dir = cohort_base_dir / exp_tag if exp_tag else cohort_base_dir
 
     common_ids_csv = Path(args.common_ids_csv) if args.common_ids_csv else runs_root / "gen" / cohort_base_dir / "common_target_ids.csv"
-    real_train_csv = Path(args.real_train_csv) if args.real_train_csv else default_real_csv(language)
-    real_test_csv = Path(args.real_test_csv) if args.real_test_csv else default_real_csv(language)
+    real_train_csv = Path(args.real_train_csv) if args.real_train_csv else dataset_root / "splits" / "train.csv"
+    real_test_csv = Path(args.real_test_csv) if args.real_test_csv else dataset_root / "splits" / "test.csv"
 
     manifest_csv = Path(args.manifest_csv) if args.manifest_csv else runs_root / "eval" / "pipeline" / "pipeline_manifest.csv"
     state_json = Path(args.state_json) if args.state_json else runs_root / "eval" / "pipeline" / "states" / cohort_exp_dir / f"{run_name}.json"
@@ -1318,6 +1353,7 @@ def main() -> None:
             pair_exact_balance_lr=bool(args.pair_exact_balance_lr),
             judge_seed_base=args.judge_seed_base,
             domain_default=domain_default,
+            language=language,
             control_template_text=control_template_text,
             dedupe_meta=dedupe_meta,
         )
@@ -1399,24 +1435,20 @@ def main() -> None:
                 ]
             )
 
-            collect_single_script = Path("scripts/eval/judge/collect_single_scoreboard.py")
-            if collect_single_script.exists():
-                run_cmd(
-                    [
-                        sys.executable,
-                        str(collect_single_script),
-                        "--judged_root",
-                        str(backend_root),
-                        "--pattern",
-                        f"**/judged_single__*__{backend}_single_v1.csv",
-                        "--out_csv",
-                        str(single_score_csv),
-                        "--mu_real_drift_threshold",
-                        str(args.single_mu_real_drift_threshold),
-                    ]
-                )
-            else:
-                print(f"[WARN] Missing optional script: {collect_single_script}. Skipping single scoreboard collection.")
+            run_cmd(
+                [
+                    sys.executable,
+                    "scripts/eval/judge/collect_single_scoreboard.py",
+                    "--judged_root",
+                    str(backend_root),
+                    "--pattern",
+                    f"**/judged_single__*__{backend}_single_v1.csv",
+                    "--out_csv",
+                    str(single_score_csv),
+                    "--mu_real_drift_threshold",
+                    str(args.single_mu_real_drift_threshold),
+                ]
+            )
 
             cmd = [
                 sys.executable,
@@ -1456,11 +1488,7 @@ def main() -> None:
                 cmd.extend(["--aggregate_main_by_base"])
             else:
                 cmd.extend(["--no-aggregate_main_by_base"])
-            collect_pair_script = Path(cmd[1])
-            if collect_pair_script.exists():
-                run_cmd(cmd)
-            else:
-                print(f"[WARN] Missing optional script: {collect_pair_script}. Skipping pairwise scoreboard collection.")
+            run_cmd(cmd)
 
             backend_outputs[backend] = {
                 "single_output_csv": str(single_out_csv),
@@ -1503,11 +1531,7 @@ def main() -> None:
                     cmd.extend(["--single_csv_qwen", qwen_single_csv])
                 if have_llama:
                     cmd.extend(["--single_csv_llama", llama_single_csv])
-                interp_script = Path(cmd[1])
-                if interp_script.exists():
-                    run_cmd(cmd)
-                else:
-                    print(f"[WARN] Missing optional script: {interp_script}. Skipping interpretability examples.")
+                run_cmd(cmd)
 
                 interpretability_outputs = {
                     "examples_csv": str(interp_csv),
@@ -1675,6 +1699,543 @@ def main() -> None:
     print(f"stage={stage}")
     print(f"state_json={state_json}")
     print(json.dumps(state.get("stage_outputs", {}).get(stage, {}), ensure_ascii=False, indent=2))
+
+
+# ---- End inlined stage execution library ----
+
+def parse_csv_list(raw: str) -> List[str]:
+    return [x.strip() for x in str(raw or "").split(",") if x.strip()]
+
+
+def sanitize_slug(s: str) -> str:
+    out = re.sub(r"[^a-zA-Z0-9_]+", "_", str(s or "").strip().lower())
+    out = re.sub(r"_+", "_", out).strip("_")
+    return out or "dataset"
+
+
+def parse_dataset_map(raw: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for item in parse_csv_list(raw):
+        if ":" not in item:
+            raise RuntimeError(f"Invalid --dataset_map entry (expected lang:dataset): {item}")
+        lang, ds = item.split(":", 1)
+        out[lang.strip().lower()] = ds.strip()
+    return out
+
+
+def discover_languages(languages_root: Path) -> List[str]:
+    out = []
+    if not languages_root.exists():
+        return out
+    for p in sorted(languages_root.iterdir()):
+        if p.is_dir() and (p / "datasets").exists():
+            out.append(p.name)
+    return out
+
+
+def discover_dataset(language: str, explicit_dataset: str, dataset_map: Dict[str, str], languages_root: Path) -> str:
+    lang_key = language.lower()
+    if lang_key in dataset_map:
+        return dataset_map[lang_key]
+    if explicit_dataset:
+        return explicit_dataset
+
+    droot = languages_root / language / "datasets"
+    if not droot.exists():
+        raise RuntimeError(f"No datasets directory found for language={language}: {droot}")
+
+    candidates = [p.name for p in sorted(droot.iterdir()) if p.is_dir()]
+    if not candidates:
+        raise RuntimeError(f"No dataset subdirectories found in: {droot}")
+    return candidates[0]
+
+
+def choose_runs_root(language: str, dataset: str, languages_root: Path) -> Path:
+    legacy = languages_root / language / "runs"
+    dataset_specific = legacy / dataset
+    if dataset_specific.exists():
+        return dataset_specific
+    if legacy.exists() and (legacy / "gen").exists():
+        return legacy
+    return dataset_specific
+
+
+def candidate_language_dirs(language: str) -> List[str]:
+    l = language.lower()
+    if l == "swahili":
+        return ["swahili", "swahilli"]
+    if l == "swahilli":
+        return ["swahilli", "swahili"]
+    return [l]
+
+
+def _score_config(path: Path, language: str, variant: str) -> Tuple[int, int, int]:
+    name = path.name.lower()
+    lang_score = 0 if any(x in name for x in candidate_language_dirs(language)) else 1
+    var_score = 0 if variant in name else 1
+    return (var_score, lang_score, len(name))
+
+
+def find_generation_config(language: str, variant: str, repo_root: Path) -> Path:
+    v = str(variant or "").strip().lower()
+    if v not in {"fs5", "zs"}:
+        raise RuntimeError(f"Unsupported prompt variant: {variant}")
+    paths: List[Path] = []
+    for lang_dir in candidate_language_dirs(language):
+        gdir = repo_root / "configs" / lang_dir / "gen"
+        if gdir.exists():
+            paths.extend(sorted(gdir.glob("*.json")))
+    if paths:
+        ranked = sorted(paths, key=lambda p: _score_config(p, language, v))
+        return ranked[0]
+
+    cfg = repo_root / "configs" / f"gen_{v}_config.json"
+    if cfg.exists():
+        return cfg
+    raise RuntimeError(
+        f"No generation config found for language={language}, variant={variant}. "
+        f"Tried configs/<language>/gen/*.json and {cfg}"
+    )
+
+
+def find_judge_configs(language: str, repo_root: Path, single_override: str, pair_override: str) -> Tuple[Path, Path]:
+    if single_override and pair_override:
+        single = Path(single_override)
+        pair = Path(pair_override)
+        if not single.exists():
+            raise RuntimeError(f"Missing judge single config: {single}")
+        if not pair.exists():
+            raise RuntimeError(f"Missing judge pairwise config: {pair}")
+        return single, pair
+
+    candidates: List[Path] = []
+    for lang_dir in candidate_language_dirs(language):
+        jdir = repo_root / "configs" / lang_dir / "judge"
+        if jdir.exists():
+            candidates.extend(sorted(jdir.glob("*.json")))
+
+    singles = [p for p in candidates if "judge_single" in p.name]
+    pairs = [p for p in candidates if "judge_pairwise" in p.name]
+
+    if singles:
+        singles = sorted(singles, key=lambda p: (1 if p.name.endswith("_ha.json") else 0, len(p.name)))
+        single = Path(single_override) if single_override else singles[0]
+    else:
+        single = Path(single_override) if single_override else (repo_root / "configs" / "judge_single_config.json")
+
+    if pairs:
+        pairs = sorted(pairs, key=lambda p: (1 if p.name.endswith("_ha.json") else 0, len(p.name)))
+        pair = Path(pair_override) if pair_override else pairs[0]
+    else:
+        pair = Path(pair_override) if pair_override else (repo_root / "configs" / "judge_pairwise_config.json")
+
+    if not single.exists():
+        raise RuntimeError(
+            f"Missing judge single config for language={language}. "
+            f"Tried language-specific configs and fallback {single}"
+        )
+    if not pair.exists():
+        raise RuntimeError(
+            f"Missing judge pairwise config for language={language}. "
+            f"Tried language-specific configs and fallback {pair}"
+        )
+    return single, pair
+
+
+def infer_prompt_lang(prompt_config: Path, language: str) -> str:
+    cfg = json.load(open(prompt_config, "r", encoding="utf-8"))
+    keys = list((cfg.get("system_prompt") or {}).keys())
+    if not keys:
+        return "english"
+    l = language.lower()
+    if l in keys:
+        return l
+    if l == "swahili" and "swahilli" in keys:
+        return "swahilli"
+    if l == "swahilli" and "swahili" in keys:
+        return "swahili"
+    if "english" in keys:
+        return "english"
+    return keys[0]
+
+
+def ensure_dataset_prepared(
+    python_exe: str,
+    repo_root: Path,
+    language: str,
+    dataset: str,
+    dataset_root: Path,
+    domain: str,
+    prepare_data: bool,
+) -> None:
+    train_csv = dataset_root / "splits" / "train.csv"
+    test_csv = dataset_root / "splits" / "test.csv"
+    targets_csv = dataset_root / "targets" / "targets_for_generation.csv"
+
+    if train_csv.exists() and test_csv.exists() and targets_csv.exists():
+        return
+    if not prepare_data:
+        raise RuntimeError(
+            "Required prepared files are missing while --no-prepare_data is set. "
+            f"Expected: {train_csv}, {test_csv}, {targets_csv}"
+        )
+
+    cmd = [
+        python_exe,
+        str(repo_root / "scripts" / "utils" / "prepare_language_dataset.py"),
+        "--language",
+        language,
+        "--dataset",
+        dataset,
+        "--out_root",
+        str(dataset_root),
+        "--domain",
+        domain,
+    ]
+    run_cmd(cmd)
+
+
+def run_generation(
+    python_exe: str,
+    repo_root: Path,
+    targets_csv: Path,
+    run_spec: RunSpec,
+    domain: str,
+    max_tries: int,
+    resume: bool,
+    language: str,
+) -> None:
+    if run_spec.backend == "qwen":
+        script = repo_root / "scripts" / "gen" / "qwen" / "generate_qwen_reviews.py"
+    elif run_spec.backend == "llama":
+        script = repo_root / "scripts" / "gen" / "llama" / "generate_llama_reviews.py"
+    else:
+        raise RuntimeError(f"Unsupported generator backend: {run_spec.backend}")
+
+    cmd = [
+        python_exe,
+        str(script),
+        "--targets_csv",
+        str(targets_csv),
+        "--out_csv",
+        str(run_spec.gen_csv),
+        "--run_id",
+        run_spec.run_name,
+        "--lang",
+        language,
+        "--domain",
+        domain,
+        "--prompt_lang",
+        run_spec.prompt_lang,
+        "--prompt_config",
+        str(run_spec.prompt_config),
+        "--max_tries",
+        str(max_tries),
+    ]
+    if resume:
+        cmd.append("--resume")
+    run_cmd(cmd)
+
+
+def write_common_ids(run_specs: List[RunSpec], out_csv: Path, mode: str) -> int:
+    sets: List[set] = []
+    for spec in run_specs:
+        if not spec.gen_csv.exists():
+            raise RuntimeError(f"Generated CSV not found for common-id build: {spec.gen_csv}")
+        df = pd.read_csv(spec.gen_csv)
+        if "target_id" not in df.columns:
+            raise RuntimeError(f"Generated CSV missing target_id: {spec.gen_csv}")
+        ids = set(pd.to_numeric(df["target_id"], errors="coerce").dropna().astype(int).tolist())
+        sets.append(ids)
+
+    if not sets:
+        raise RuntimeError("No runs available to build common target IDs")
+
+    if mode == "first_run":
+        common_ids = sorted(sets[0])
+    else:
+        common_ids = sorted(set.intersection(*sets))
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"target_id": common_ids}).to_csv(out_csv, index=False)
+    return len(common_ids)
+
+
+def run_eval_for_language(
+    language: str,
+    dataset: str,
+    dataset_root: Path,
+    runs_root: Path,
+    run_specs: List[RunSpec],
+    common_ids_csv: Path,
+    cohort: str,
+    exp_tag: str,
+    judge_backends: str,
+    judge_single_cfg: Path,
+    judge_pair_cfg: Path,
+) -> None:
+    for spec in run_specs:
+        for stage in EVAL_STAGES_PER_RUN:
+            stage_args = [
+                "--language",
+                language,
+                "--dataset",
+                dataset,
+                "--dataset_root",
+                str(dataset_root),
+                "--runs_root",
+                str(runs_root),
+                "--stage",
+                stage,
+                "--run_name",
+                spec.run_name,
+                "--gen_csv",
+                str(spec.gen_csv),
+                "--cohort",
+                cohort,
+                "--common_ids_csv",
+                str(common_ids_csv),
+                "--judge_backends",
+                judge_backends,
+                "--judge_single_config",
+                str(judge_single_cfg),
+                "--judge_pairwise_config",
+                str(judge_pair_cfg),
+            ]
+            if exp_tag:
+                stage_args.extend(["--exp_tag", exp_tag])
+            run_stage(stage_args)
+
+    # Build master scoreboard once after all runs complete.
+    anchor = run_specs[0]
+    stage_args = [
+        "--language",
+        language,
+        "--dataset",
+        dataset,
+        "--dataset_root",
+        str(dataset_root),
+        "--runs_root",
+        str(runs_root),
+        "--stage",
+        "master",
+        "--run_name",
+        anchor.run_name,
+        "--gen_csv",
+        str(anchor.gen_csv),
+        "--cohort",
+        cohort,
+        "--common_ids_csv",
+        str(common_ids_csv),
+    ]
+    if exp_tag:
+        stage_args.extend(["--exp_tag", exp_tag])
+    run_stage(stage_args)
+
+
+def build_run_specs(
+    language: str,
+    dataset: str,
+    runs_root: Path,
+    cohort: str,
+    exp_tag: str,
+    backends: List[str],
+    variants: List[str],
+    repo_root: Path,
+    run_suffix: str,
+    reuse_existing: bool = False,
+) -> List[RunSpec]:
+    cohort_path = Path(cohort) / exp_tag if exp_tag else Path(cohort)
+    gen_dir = runs_root / "gen" / cohort_path
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    dataset_slug = sanitize_slug(dataset)
+    suffix = f"_{sanitize_slug(run_suffix)}" if run_suffix else ""
+
+    def parse_version(stem: str, prefix: str, suffix_part: str) -> Optional[int]:
+        # Match names like "<prefix>_v12<suffix>".
+        pat = re.compile(rf"^{re.escape(prefix)}_v(\d+){re.escape(suffix_part)}$")
+        m = pat.match(stem)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    def choose_version(prefix: str, suffix_part: str) -> int:
+        versions: List[int] = []
+        for fp in gen_dir.glob(f"{prefix}_v*{suffix_part}.csv"):
+            v = parse_version(fp.stem, prefix, suffix_part)
+            if v is not None:
+                versions.append(v)
+        if reuse_existing:
+            # For --skip_generate we want the latest existing run, not a new one.
+            return max(versions) if versions else 1
+        return (max(versions) + 1) if versions else 1
+
+    specs: List[RunSpec] = []
+    for backend in backends:
+        for variant in variants:
+            prefix = f"{backend}_{variant}_{sanitize_slug(language)}_{dataset_slug}"
+            version = choose_version(prefix, suffix)
+            run_name = f"{prefix}_v{version}{suffix}"
+            prompt_cfg = find_generation_config(language=language, variant=variant, repo_root=repo_root)
+            prompt_lang = infer_prompt_lang(prompt_cfg, language)
+            specs.append(
+                RunSpec(
+                    backend=backend,
+                    variant=variant,
+                    run_name=run_name,
+                    gen_csv=gen_dir / f"{run_name}.csv",
+                    prompt_config=prompt_cfg,
+                    prompt_lang=prompt_lang,
+                )
+            )
+    return specs
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Unified multi-language generation + evaluation runner")
+    ap.add_argument("--languages", default="auto", help="Comma-separated language names or 'auto'")
+    ap.add_argument("--dataset", default="", help="Single dataset name for all languages (optional)")
+    ap.add_argument("--dataset_map", default="", help="Overrides like 'nepali:yt_nepali_movie_reviews,hausa:hausa_reviews'")
+    ap.add_argument("--cohort", default="common_subset_auto_v1")
+    ap.add_argument("--exp_tag", default="")
+    ap.add_argument("--domain", default="review")
+    ap.add_argument("--generator_backends", default="qwen,llama", help="Comma list: qwen,llama")
+    ap.add_argument("--prompt_variants", default="zs,fs5", help="Comma list: zs,fs5")
+    ap.add_argument("--judge_backends", default="qwen,llama")
+    ap.add_argument("--judge_single_config", default="")
+    ap.add_argument("--judge_pairwise_config", default="")
+    ap.add_argument("--prepare_data", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--skip_generate", action="store_true")
+    ap.add_argument("--skip_eval", action="store_true")
+    ap.add_argument("--max_tries", type=int, default=3)
+    ap.add_argument("--gen_resume", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--common_ids_mode", choices=["intersection", "first_run"], default="intersection")
+    ap.add_argument("--run_suffix", default="")
+    args = ap.parse_args()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    languages_root = repo_root / "languages"
+    dataset_map = parse_dataset_map(args.dataset_map)
+
+    languages = parse_csv_list(args.languages)
+    if not languages or (len(languages) == 1 and languages[0].lower() == "auto"):
+        languages = discover_languages(languages_root)
+    if not languages:
+        raise RuntimeError("No languages found to run.")
+
+    backends = [x.lower() for x in parse_csv_list(args.generator_backends)]
+    variants = [x.lower() for x in parse_csv_list(args.prompt_variants)]
+    if not backends or not variants:
+        raise RuntimeError("generator_backends and prompt_variants must be non-empty")
+
+    for b in backends:
+        if b not in {"qwen", "llama"}:
+            raise RuntimeError(f"Unsupported generator backend: {b}")
+    for v in variants:
+        if v not in {"zs", "fs5"}:
+            raise RuntimeError(f"Unsupported prompt variant: {v}")
+
+    for language in languages:
+        dataset = discover_dataset(language, args.dataset, dataset_map, languages_root)
+        dataset_root = languages_root / language / "datasets" / dataset
+        runs_root = choose_runs_root(language, dataset, languages_root)
+        runs_root.mkdir(parents=True, exist_ok=True)
+
+        print("\n============================================================")
+        print(f"LANGUAGE={language}")
+        print(f"DATASET={dataset}")
+        print(f"DATASET_ROOT={dataset_root}")
+        print(f"RUNS_ROOT={runs_root}")
+        print("============================================================")
+
+        ensure_dataset_prepared(
+            python_exe=sys.executable,
+            repo_root=repo_root,
+            language=language,
+            dataset=dataset,
+            dataset_root=dataset_root,
+            domain=args.domain,
+            prepare_data=bool(args.prepare_data),
+        )
+
+        targets_csv = dataset_root / "targets" / "targets_for_generation.csv"
+        if not targets_csv.exists():
+            raise RuntimeError(f"targets CSV not found after preparation: {targets_csv}")
+
+        run_specs = build_run_specs(
+            language=language,
+            dataset=dataset,
+            runs_root=runs_root,
+            cohort=args.cohort,
+            exp_tag=args.exp_tag,
+            backends=backends,
+            variants=variants,
+            repo_root=repo_root,
+            run_suffix=args.run_suffix,
+            reuse_existing=bool(args.skip_generate),
+        )
+        print("Planned runs:")
+        for spec in run_specs:
+            print(
+                f"  - {spec.run_name} | backend={spec.backend} variant={spec.variant} "
+                f"prompt_lang={spec.prompt_lang} prompt_cfg={spec.prompt_config}"
+            )
+
+        if not args.skip_generate:
+            for spec in run_specs:
+                run_generation(
+                    python_exe=sys.executable,
+                    repo_root=repo_root,
+                    targets_csv=targets_csv,
+                    run_spec=spec,
+                    domain=args.domain,
+                    max_tries=int(args.max_tries),
+                    resume=bool(args.gen_resume),
+                    language=language,
+                )
+
+        if args.skip_generate and all(not spec.gen_csv.exists() for spec in run_specs):
+            if args.skip_eval:
+                print("No generated CSVs found and both --skip_generate and --skip_eval are set; skipping this language.")
+                continue
+            raise RuntimeError(
+                "skip_generate was requested but generated CSVs were not found. "
+                f"Expected files like: {run_specs[0].gen_csv}"
+            )
+
+        common_ids_csv = runs_root / "gen" / args.cohort / "common_target_ids.csv"
+        n_common = write_common_ids(run_specs, common_ids_csv, mode=args.common_ids_mode)
+        print(f"common_ids_csv={common_ids_csv} n={n_common}")
+
+        if args.skip_eval:
+            continue
+
+        single_cfg, pair_cfg = find_judge_configs(
+            language=language,
+            repo_root=repo_root,
+            single_override=args.judge_single_config,
+            pair_override=args.judge_pairwise_config,
+        )
+        print(f"judge_single_config={single_cfg}")
+        print(f"judge_pairwise_config={pair_cfg}")
+
+        run_eval_for_language(
+            language=language,
+            dataset=dataset,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            run_specs=run_specs,
+            common_ids_csv=common_ids_csv,
+            cohort=args.cohort,
+            exp_tag=args.exp_tag,
+            judge_backends=args.judge_backends,
+            judge_single_cfg=single_cfg,
+            judge_pair_cfg=pair_cfg,
+        )
+
+    print("\nCompleted multi-language generation + evaluation pipeline.")
 
 
 if __name__ == "__main__":
