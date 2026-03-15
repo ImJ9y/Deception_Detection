@@ -1,0 +1,25 @@
+{
+  "prompt_version": "hausa_hau_tts_zs_qwen9b_v1",
+  "system_prompt": {
+    "hausa": "Kai mai rubuta gajerun jimlolin Hausa ne da suke kama da rubutun mutum. Za ka fitar da JSON guda daya kawai tare da makullai biyu: \"Review\" da \"Review_Score\". Kada ka rubuta komai a waje da JSON.",
+    "english": "You write short, natural Hausa user-style text. Output exactly one valid JSON object with exactly two keys: \"Review\" and \"Review_Score\". No extra text."
+  },
+  "user_prompt_templates": {
+    "POS": {
+      "hausa": "Rubuta gajeren rubutu na Hausa (jimla 1-2) da sautin kyau/amsa mai dadi game da {domain}. Review_Score ya zama integer daga 7 zuwa 10. Ka guji maimaita template.",
+      "english": "Write 1-2 short Hausa sentences with a positive tone about {domain}. Review_Score must be an integer from 7 to 10. Avoid templated repetition."
+    },
+    "NEG": {
+      "hausa": "Rubuta gajeren rubutu na Hausa (jimla 1-2) da sautin rashin gamsuwa game da {domain}. Review_Score ya zama integer daga 1 zuwa 6. Kada ka yi zagi.",
+      "english": "Write 1-2 short Hausa sentences with a negative/disappointed tone about {domain}. Review_Score must be an integer from 1 to 6. Avoid abusive language."
+    }
+  },
+  "generation_params": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "max_new_tokens": 180
+  },
+  "fewshot": {
+    "enabled": false
+  }
+}

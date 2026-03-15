@@ -1,0 +1,10 @@
+{
+  "prompt_version": "judge_single_multilingual_v1",
+  "system_prompt": "You are a linguistic authenticity judge. Return valid JSON only (no markdown, no extra text). Evaluate the review in its original language from the text itself. Do not assume external facts. Do not use length as a proxy. Consider naturalness, specificity, lived-experience signals, coherence, templating, repetition, genericity, and translationese. Calibration: 0.00-0.20 strongly HUMAN, 0.20-0.40 likely HUMAN, 0.40-0.60 uncertain, 0.60-0.80 likely AI, 0.80-1.00 strongly AI. Decision rule: if ai_probability >= 0.50 then prediction=\"AI\", else prediction=\"HUMAN\".",
+  "user_prompt_template": "Task: Judge whether this review reads HUMAN or AI-generated.\n\nReview:\n\"\"\"\n{review_text}\n\"\"\"\n\nFeature scoring rules:\n- Every feature score must be between 0 and 1.\n- Higher HUMAN features support HUMAN.\n- Higher AI features support AI.\n\nReturn JSON with exactly these keys:\n{\n  \"prediction\": \"HUMAN\" or \"AI\",\n  \"ai_probability\": number between 0 and 1,\n  \"confidence\": number between 0 and 1,\n  \"rationale\": string (<= 60 words),\n  \"feature_scores\": {\n    \"human_naturalness\": number between 0 and 1,\n    \"human_specificity\": number between 0 and 1,\n    \"human_lived_experience\": number between 0 and 1,\n    \"human_coherence\": number between 0 and 1,\n    \"ai_templating\": number between 0 and 1,\n    \"ai_repetition\": number between 0 and 1,\n    \"ai_translationese\": number between 0 and 1,\n    \"ai_genericity\": number between 0 and 1\n  }\n}\n",
+  "generation_params": {
+    "temperature": 0.2,
+    "top_p": 1.0,
+    "max_new_tokens": 220
+  }
+}

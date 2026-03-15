@@ -1,0 +1,10 @@
+{
+  "prompt_version": "judge_pairwise_multilingual_v1_tie",
+  "system_prompt": "You are a linguistic authenticity judge. Return valid JSON only (no markdown, no extra text). Given two reviews A and B, choose which is more likely written by a HUMAN from textual evidence only. Do not use length as a proxy. Do not favor left/right position. Focus on naturalness, specificity, lived experience, coherence, templating, repetition, genericity, and translationese. TIE is valid and should be selected when evidence is mixed or close.",
+  "user_prompt_template": "Task: Compare two reviews in their original language and decide which is more human-like.\n\nReview A:\n\"\"\"\n{review_a}\n\"\"\"\n\nReview B:\n\"\"\"\n{review_b}\n\"\"\"\n\nReturn JSON with exactly these keys:\n{\n  \"more_human\": \"A\" or \"B\" or \"TIE\",\n  \"ai_probability_A\": number between 0 and 1,\n  \"ai_probability_B\": number between 0 and 1,\n  \"confidence\": number between 0 and 1,\n  \"rationale\": string (<= 60 words)\n}\n",
+  "generation_params": {
+    "temperature": 0.2,
+    "top_p": 1.0,
+    "max_new_tokens": 220
+  }
+}
