@@ -95,6 +95,6 @@ Run additional stages (`validate`, `subset`, `dist`, `judge`, `detector`, `maste
 - This public sample excludes private credentials, non-public data, and restricted internal assets.
 - Any externally authored code should be attributed at file level if included.
 
-## Related Publication (if applicable)
+## Related Publication
 - `MAiDE-up: Multilingual Deception Detection of GPT-generated Hotel Reviews`
 - https://arxiv.org/pdf/2404.12938
